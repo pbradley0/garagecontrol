@@ -1,6 +1,7 @@
 /* Garage Door Controller
  * Paul Bradley Aug 2023
- * v1.0
+ * v1.1
+ * Fixed issues with reading the position of the door
  * 
  * Circuit:
  * Door relay connected to pin 26 (G26)
@@ -24,11 +25,11 @@ const char* passwd = "yourpasswd";
 const char* hostname = "First Garage Controller";
 
 // MQTT config
-const char* mqttServer = "192.168.1.128";  // MQTT server on artemis
+const char* mqttServer = "192.168.1.128";  // MQTT server address
 const int mqttPort = 1883;  // MQTT port
 const char* clientName = "garage";
-const char* userName = "garagecontrol"; // MQTT username
-const char* password = "yourmqttpasswd";  // MQTT pasword
+const char* userName = "yourmqttusername"; // MQTT username
+const char* password = "yourmqttpassword";  // MQTT pasword
 
 //ESP32 pins
 const int garageDoorRelayPin = 26;
@@ -43,10 +44,10 @@ const int dataPin = 21;
 
 // Global variables
 bool boot = true;
-int garagePercent = 0;
+int garagePercent = -1;
 int garagePercentOld = 0;
-int garageStatus = digitalRead(closedDoorPin);
-int garageStatusOld = garageStatus;
+int garageStatus = -1;
+int garageStatusOld = -1;
 
 void WiFireconnect(WiFiEvent_t wifi_event, WiFiEventInfo_t wifi_info);  // Reconnects WiFi if connection is lost
 void mqttReceive(char* topic, byte* payload, unsigned int length);
@@ -69,6 +70,8 @@ void setup()
   // Set up mag encoder
   as5600.begin(dataPin, clockPin, AS5600_SW_DIRECTION_PIN);  //  set magnetic encoder pins.
   as5600.setDirection(AS5600_CLOCK_WISE);  // default, just be explicit.
+  as5600.resetPosition();
+  as5600.resetCumulativePosition(0);
   int b = as5600.isConnected();
   Serial.print("AS5600 Connection: ");
   Serial.println(b);
@@ -97,6 +100,9 @@ void setup()
   // Set up MQTT server
   mqttClient.setServer(mqttServer, mqttPort);
   mqttClient.setCallback(mqttReceive);
+
+  garageStatus = digitalRead(closedDoorPin);
+  garageStatusOld = -1;
 
   // Set up periodic functions
   timer.setInterval(300000, checkIn);  // Checks in with server every 5 minutes (300000)
@@ -217,71 +223,62 @@ void reportGarageStatus()
   String garageStatusTopic = "garage/" + garageName + "/status";  // Create the status string
   String garagePercentTopic = "garage/" + garageName + "/percent";  //  Create the percent string
   float garageSpeed = as5600.getAngularSpeed();
-  int closedSwitchStatus = digitalRead(closedDoorPin);   
-  
-  if ( garageSpeed == 0 )
-  {
-    if ( closedSwitchStatus == false)  // Reed switch shows door is closed
-      garageStatus = closed;
-    else
-      garageStatus = open;
-      
-    if ( garageStatus != garageStatusOld )  // If the door open or closed has changed so we don't spam the MQTT server
-    {
-      if ( garageStatus == closed )  // Door is closed
-      {
-        mqttClient.publish(garageStatusTopic.c_str(), "closed", true);
-        Serial.println("Garage is closed");
-        as5600.resetCumulativePosition();  // Resets the revolution counter just in case its off
-        garagePercent = 0;  // Reset percent open
-      }
-      else
-      {
-        mqttClient.publish(garageStatusTopic.c_str(), "open", true);
-        Serial.print("Garage is open ");
-        Serial.print(garagePercent);
-        Serial.println("%");
-        garageStatus = open;
-      }
-      garageStatusOld = garageStatus;
-    }
-  }
-  else // Door is moving.
-  {
-    garagePercent = ( (float)as5600.getRevolutions() / garageTravel ) * 100;
+  int closedSwitchStatus = !digitalRead(closedDoorPin);  
 
+  if ( garageSpeed != 0 && closedSwitchStatus != true) // Garage is moving
+  {
+    garagePercent = (float)(as5600.getCumulativePosition() / 4095) / (float)garageTravel * 100; //calculate the percentage open based on revolutions
+    if (garagePercent < 0 )
+      garagePercent = 0;
+      
     if (garageSpeed > 0 )  // Garage is opening
     {
-      garageStatus = opening;
-      if ( garageStatus != garageStatusOld )  // Only update if something changed so we don't spam the MQTT server
-      {
-        mqttClient.publish(garageStatusTopic.c_str(), "opening", true);
-        Serial.println("Garage is opening ");
-        garageStatusOld = garageStatus;
-      }          
+      garageStatus = opening;        
     }
 
     if (garageSpeed < 0 )  // Garage is closing
     {
       garageStatus = closing;
-      if ( garageStatus != garageStatusOld )  // Only update if something changed so we don't spam the MQTT server
-      {
-        mqttClient.publish(garageStatusTopic.c_str(), "closing", true);
-        Serial.println("Garage is closing ");
-        garageStatusOld = garageStatus;
-      }
-    }    
-
-    if ( (garagePercent % 5 == 0 ) && (garagePercent != garagePercentOld) )  // If the percentage is a multiple of 5 and is new
+    }
+    
+    if ( garagePercent != garagePercentOld && garagePercent % 5 == 0)  // If the percentage is new
     {
-      Serial.print(garagePercent);
-      Serial.print("% ");
-      char percent [2];
-      itoa(garagePercent, percent, 10);
-      mqttClient.publish(garagePercentTopic.c_str(), percent, true);
-      garagePercentOld = garagePercent;
+        Serial.print(garagePercent);
+        Serial.print("% ");
+        char percent [4];
+        itoa(garagePercent, percent, 10);
+        mqttClient.publish(garagePercentTopic.c_str(), percent, true);
+        garagePercentOld = garagePercent;
     }
   }
+  else // Garage isn't moving
+  {
+    if ( closedSwitchStatus == true )
+    {
+      as5600.resetPosition();
+      garageStatus = closed;
+    }
+    else
+      garageStatus = open;
+  } 
+
+  //  Report changes in garage status  
+  if (garageStatus != garageStatusOld)
+  {
+    mqttClient.publish(garageStatusTopic.c_str(), (garageStatus == closed ? "closed" : (garageStatus == open ? "open" : (garageStatus == opening ? "opening" : "closing"))), true);
+    Serial.print("Garage is ");
+    Serial.print((garageStatus == closed ? "closed" : (garageStatus == open ? "open" : (garageStatus == opening ? "opening" : "closing"))));
+    Serial.println();
+    garageStatusOld = garageStatus;  
+  }
+
+  if ( garagePercent < 0 && garagePercent != garagePercentOld) // Percentage is unknown.  Likely because of a recent reboot
+  {
+    mqttClient.publish(garagePercentTopic.c_str(), "unknown", true);
+    Serial.println("Percentage is unknown");
+    garagePercentOld = garagePercent;    
+  }
+
 }
 
 void checkIn()
