@@ -227,7 +227,7 @@ void reportGarageStatus()
 
   if ( garageSpeed != 0 && closedSwitchStatus != true) // Garage is moving
   {
-    garagePercent = (float)(as5600.getCumulativePosition() / 4095) / (float)garageTravel * 100; //calculate the percentage open based on revolutions
+    garagePercent = ((float)as5600.getCumulativePosition() / 4095) / garageTravel * 100; //calculate the percentage open based on revolutions
     if (garagePercent < 0 )
       garagePercent = 0;
       
