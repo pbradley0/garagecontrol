@@ -223,12 +223,13 @@ void reportGarageStatus()
   String garageStatusTopic = "garage/" + garageName + "/status";  // Create the status string
   String garagePercentTopic = "garage/" + garageName + "/percent";  //  Create the percent string
   float garageSpeed = as5600.getAngularSpeed();
-  int closedSwitchStatus = !digitalRead(closedDoorPin);  
+  int closedSwitchStatus = !digitalRead(closedDoorPin);  // Inverted to make more logical sense
 
-  if ( garageSpeed != 0 && closedSwitchStatus != true) // Garage is moving
+  if ( garageSpeed != 0 && closedSwitchStatus == false) // Garage is moving
   {
     garagePercent = ((float)as5600.getCumulativePosition() / 4095) / garageTravel * 100; //calculate the percentage open based on revolutions
-    if (garagePercent < 0 )
+    
+    if (garagePercent < 0 )  // Prevents it from reporting negative percentage if the garage closes just a bit extra each time
       garagePercent = 0;
       
     if (garageSpeed > 0 )  // Garage is opening
@@ -241,10 +242,10 @@ void reportGarageStatus()
       garageStatus = closing;
     }
     
-    if ( garagePercent != garagePercentOld && garagePercent % 5 == 0)  // If the percentage is new
+    if ( garagePercent != garagePercentOld && garagePercent % 5 == 0)  // If the percentage is new and a multiple of 5
     {
         Serial.print(garagePercent);
-        Serial.print("% ");
+        Serial.println("%");
         char percent [4];
         itoa(garagePercent, percent, 10);
         mqttClient.publish(garagePercentTopic.c_str(), percent, true);
@@ -253,12 +254,13 @@ void reportGarageStatus()
   }
   else // Garage isn't moving
   {
-    if ( closedSwitchStatus == true )
+    if ( closedSwitchStatus == true )  // Reed switch shows door is closed.  Resets percentage
     {
       as5600.resetPosition();
+      mqttClient.publish(garagePercentTopic.c_str(), 0, true);
       garageStatus = closed;
     }
-    else
+    else  // Door isn't moving and the door is open
       garageStatus = open;
   } 
 
